@@ -157,7 +157,8 @@ class Game:
             Game.STATES.Win: self._button_pressed_Win,
             Game.STATES.WaitRelease: self._button_pressed_WaitRelease,
             Game.STATES.PreGameMultiplayer: self._button_pressed_PlayingMultiplayer,
-            Game.STATES.PlayingMultiplayer: self._button_pressed_PlayingMultiplayer
+            Game.STATES.PlayingMultiplayer: self._button_pressed_PlayingMultiplayer,
+            Game.STATES.Timeout: self._button_pressed_Timeout
         }
 
         self._button_released_callbacks = {
@@ -167,7 +168,8 @@ class Game:
             Game.STATES.PlayingAllReleased: self._button_released_PlayingAllReleased,
             Game.STATES.Lose: self._button_released_Lose,
             Game.STATES.Win: self._button_released_Win,
-            Game.STATES.WaitRelease: self._button_released_WaitRelease
+            Game.STATES.WaitRelease: self._button_released_WaitRelease,
+            Game.STATES.Timeout: self._button_released_Timeout
         }
 
         self._register_callbacks = {
@@ -201,19 +203,17 @@ class Game:
     def button_pressed(self, unit_id: int):
         _logger.info(f"Event: Button Pressed, Unit: {unit_id:#x}")
 
-        if self.state == Game.STATES.Timeout:  # Ignore button press during Timeout state
-            _logger.info("Ignoring button press during Timeout state")
-            return
-
         if unit_id in self.ACTIVE:
             unit = self.ACTIVE[unit_id]
 
             # Always check for fast press first
-            if unit_id == self.correct and self.state in {Game.STATES.Playing, Game.STATES.PlayingAllReleased} and self._is_fast_press():
-                _logger.info("Fast press detected, transitioning to multiplayer mode")
-                self.fast_press_detected = True
-                self._start_multiplayer()
-                return
+            if unit_id == self.correct:
+                if self.state == Game.STATES.PreGameSingle:
+                    self.last_press_time = datetime.now()
+                elif self.state in {Game.STATES.Playing, Game.STATES.PlayingAllReleased} and self._is_fast_press():
+                    _logger.info("Fast press detected, transitioning to multiplayer mode")
+                    self._start_multiplayer()
+                    return
 
             unit.button_pressed = True
             self.pressed_units.add(unit)
@@ -223,10 +223,6 @@ class Game:
 
     def button_released(self, unit_id: int):
         _logger.info(f"Event: Button Released, Unit: {unit_id:#x}")
-
-        if self.state == Game.STATES.Timeout: #(Bugfix) Set state to Timeout
-            _logger.info("Ignoring button release during Timeout state")
-            return
 
         if unit_id in self.ACTIVE:
             unit = self.ACTIVE[unit_id]
@@ -340,7 +336,6 @@ class Game:
             assert (self._control_task is not None)
             self._control_task.cancel()
             self._control_task = asyncio.create_task(self._control_Playing())
-
             self.state = Game.STATES.Playing
 
     def _update_unit_display(self, unit: Unit, player: int): #Multi:
@@ -466,6 +461,7 @@ class Game:
     def _button_pressed_Lose(self, unit: Unit):
         pass
     _button_pressed_Win = _button_pressed_Lose
+    _button_pressed_Timeout = _button_pressed_Lose
 
     def _button_released_PreGameSingle(self, unit: Unit):
         pass
@@ -473,6 +469,7 @@ class Game:
     _button_released_PlayingAllReleased = _button_released_PreGameSingle
     _button_released_Lose = _button_released_PreGameSingle
     _button_released_Win = _button_released_PreGameSingle
+    _button_released_Timeout = _button_released_PreGameSingle
 
     def _button_released_Playing(self, unit: Unit):
         timestamp = datetime.now() + \
@@ -565,19 +562,24 @@ class Game:
         for unit in self.ACTIVE.values():
             unit.stop_all(datetime.now())
 
-        if not self.pressed_units:
-            if len(self.ACTIVE) > 1:
-                assert self._control_task is not None
-                _logger.info(f"_control_Timeout cancels task:{self._control_task}")
-                self._control_task.cancel()
-                self._control_task = asyncio.create_task(self._control_PreGameMultiple())
-                self.state = Game.STATES.PreGameMultiple
-            elif len(self.ACTIVE) == 1:
-                assert self._control_task is not None
-                _logger.info(f"_control_Timeout cancels task:{self._control_task}")
-                self._control_task.cancel()
-                self._control_task = asyncio.create_task(self._control_PreGameSingle())
-                self.state = Game.STATES.PreGameSingle
+        if len(self.ACTIVE) > 1:
+            assert self._control_task is not None
+            _logger.info(f"_control_Timeout cancels task:{self._control_task}")
+
+            self.previous_correct = set()
+
+            self._control_task.cancel()
+            self._control_task = asyncio.create_task(self._control_PreGameMultiple())
+            self.state = Game.STATES.PreGameMultiple
+        elif len(self.ACTIVE) == 1:
+            assert self._control_task is not None
+            _logger.info(f"_control_Timeout cancels task:{self._control_task}")
+
+            self.previous_correct = set()
+
+            self._control_task.cancel()
+            self._control_task = asyncio.create_task(self._control_PreGameSingle())
+            self.state = Game.STATES.PreGameSingle
 
     async def _control_PreGameSingle(self):
         if self.correct is not None:
