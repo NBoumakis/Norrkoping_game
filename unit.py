@@ -397,8 +397,8 @@ async def main(args: list[str]):
 
     loop = asyncio.get_event_loop()
 
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ssl_context.load_verify_locations(options.ca_certificate)
+    ssl_context = None  # ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    # ssl_context.load_verify_locations(options.ca_certificate)
 
     button_led_task = asyncio.create_task(
         button_led_control(
@@ -419,9 +419,11 @@ async def main(args: list[str]):
         gamemaster_url = discover_gamemaster(
             options.gamemaster_url, options.ca_certificate)
         if gamemaster_url:
-            async with connect(f"wss://{gamemaster_url}:8001", ssl=ssl_context) as socket:
+            logger.info(f"Connecting to gamemaster at {gamemaster_url}")
+            async with connect(f"ws://{gamemaster_url}:8001", ssl=ssl_context) as socket:  # Changed to ws
                 loop.add_signal_handler(
-                    signal.SIGTERM, loop.create_task, socket.close())
+                    signal.SIGTERM, lambda: asyncio.create_task(socket.close()))
+                # loop.add_signal_handler(signal.SIGTERM, loop.create_task, socket.close())
                 button.when_pressed = lambda: button_pressed(socket, loop)
                 button.when_released = lambda: button_released(
                     socket, loop)
