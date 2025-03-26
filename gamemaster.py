@@ -905,9 +905,8 @@ class Game:
 
 
 class Gamemaster():
-    def __init__(self, url: str, priority: int, gamemaster_urls: list[str], ssl: ssl.SSLContext):
+    def __init__(self, url: str, priority: int, gamemaster_urls: list[str]):
         self.gamemaster_urls = gamemaster_urls
-        self.ca_certificate = ssl
 
         self.url = url
         self.priority = priority
@@ -1153,15 +1152,10 @@ async def main(args: list[str]):
     options = parse_arguments(args)
 
     game = Game()
-
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(options.certificate, options.key)
-
     gamemaster_params = Gamemaster(
         options.url,
         options.priority,
-        options.gamemaster_urls,
-        ssl_context)
+        options.gamemaster_urls)
     gamemaster_state = GamemasterFSM(gamemaster_params)
 
     async def process_wrap(path, req_h):
