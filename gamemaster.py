@@ -132,12 +132,8 @@ class Game:
         self._state = Game.STATES.NoUnits
         self.ACTIVE: dict[int, Unit] = {}
 
-        self.sleeping = False  # Bugfix for sleep
-
-        self.fast_press_detected = False # Multi: Added to recognize fastpush and distinguish players
         self.player_scores = {1: 0, 2: 0}
         self.player_colors = {1: (255, 255, 0), 2: (0, 0, 255)}
-        self.unit_player_map = {}
 
         self.correct_units = {1: None, 2: None}
         self.wrong_units = {1: None, 2: None}
