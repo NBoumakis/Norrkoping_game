@@ -19,10 +19,17 @@ from websockets.exceptions import ConnectionClosedError
 
 from websockets.server import WebSocketServerProtocol
 
-logging.basicConfig(format='%(asctime)s %(message)s',
+# Configure logging
+logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
                     filename='game.log', filemode='a', level=logging.INFO)
 _logger = logging.getLogger("gamemaster")
 
+# Add console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+console_handler.setFormatter(formatter)
+_logger.addHandler(console_handler)
 
 class Unit:
     def __init__(self, ws: WebSocketServerProtocol, unit_id: int) -> None:
@@ -281,7 +288,6 @@ class Game:
 
     def _button_pressed_PreGameMultiple(self, unit: Unit):
         if unit.unit_id == self.correct:
-            _logger.info("Correct")
             unit.correct_pressed(datetime.now() +
                                  timedelta(seconds=0.1) +
                                  timedelta(seconds=unit.ws.latency)
@@ -322,6 +328,7 @@ class Game:
                 )
 
             assert (self._control_task is not None)
+            _logger.info(f"_button_pressed_Playing cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_Lose())
@@ -330,6 +337,7 @@ class Game:
         elif unit.unit_id == self.correct:
             if not self.unit_list:
                 assert (self._control_task is not None)
+                _logger.info(f"_button_pressed_Playing cancels task:{self._control_task}")
                 self._control_task.cancel()
                 self._control_task = asyncio.create_task(
                     self._control_Win())
@@ -369,6 +377,7 @@ class Game:
                 )
 
             assert (self._control_task is not None)
+            _logger.info(f"_button_pressed_PlayingAllReleased cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_Lose())
@@ -379,6 +388,7 @@ class Game:
 
             if not self.unit_list:
                 assert (self._control_task is not None)
+                _logger.info(f"_button_pressed_PlayingAllReleased cancels task:{self._control_task}")
                 self._control_task.cancel()
                 self._control_task = asyncio.create_task(
                     self._control_Win())
@@ -395,6 +405,7 @@ class Game:
                 self._next_wrong()
 
                 assert (self._control_task is not None)
+                _logger.info(f"_button_pressed_PlayingAllReleased cancels task:{self._control_task}")
                 self._control_task.cancel()
                 self._control_task = asyncio.create_task(
                     self._control_Playing())
@@ -426,6 +437,7 @@ class Game:
 
         if not self.pressed_units:
             assert (self._control_task is not None)
+            _logger.info(f"_button_released_PreGameSingle cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_PlayingAllReleased())
@@ -443,6 +455,7 @@ class Game:
         if not self.pressed_units:
             if len(self.ACTIVE) > 1:
                 assert (self._control_task is not None)
+                _logger.info(f"_button_released_WaitRelease cancels task:{self._control_task}")
                 self._control_task.cancel()
                 self._control_task = asyncio.create_task(
                     self._control_PreGameMultiple())
@@ -450,6 +463,7 @@ class Game:
                 self.state = Game.STATES.PreGameMultiple
             elif len(self.ACTIVE) == 1:
                 assert (self._control_task is not None)
+                _logger.info(f"_button_released_WaitRelease cancels task:{self._control_task}")
                 self._control_task.cancel()
                 self._control_task = asyncio.create_task(
                     self._control_PreGameSingle())
@@ -603,6 +617,7 @@ class Game:
         await asyncio.sleep(10)
         if len(self.ACTIVE) > 1:
             assert (self._control_task is not None)
+            _logger.info(f"_control_Lose cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_PreGameMultiple())
@@ -611,6 +626,7 @@ class Game:
             self.state = Game.STATES.PreGameMultiple
         elif len(self.ACTIVE) == 1:
             assert (self._control_task is not None)
+            _logger.info(f"_control_Lose cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_PreGameSingle())
@@ -632,6 +648,7 @@ class Game:
 
         if len(self.ACTIVE) > 1:
             assert (self._control_task is not None)
+            _logger.info(f"_control_Win cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_PreGameMultiple())
@@ -640,6 +657,7 @@ class Game:
             self.state = Game.STATES.PreGameMultiple
         elif len(self.ACTIVE) == 1:
             assert (self._control_task is not None)
+            _logger.info(f"_control_Win cancels task:{self._control_task}")
             self._control_task.cancel()
             self._control_task = asyncio.create_task(
                 self._control_PreGameSingle())
@@ -750,18 +768,27 @@ async def handler(websocket: WebSocketServerProtocol, game: Game):
     unit_id = None
     try:
         async for msg in websocket:
-            decoded = json.loads(msg)
+            _logger.info(f"Received WebSocket message: {msg}")
+
+            if not msg:
+                _logger.warning("Received empty message")
+                continue
+
+            try:
+                decoded = json.loads(msg)
+            except json.JSONDecodeError as e:
+                _logger.error(f"JSON decode error: {e}")
+                await websocket.close(code=1002, reason='Invalid JSON format')
+                return
 
             if decoded['type'] == 'REGISTER':
                 await websocket.ping()
                 unit_id = int(decoded['id'], 16)
                 game.register(unit_id, Unit(websocket, unit_id))
             elif decoded['type'] == 'BUTTON_PRESSED':
-                print("Handle button press")
                 if unit_id is not None:
                     game.button_pressed(unit_id)
             elif decoded['type'] == 'BUTTON_RELEASED':
-                print("Handle button release")
                 if unit_id is not None:
                     game.button_released(unit_id)
             elif decoded['type'] == 'UNREGISTER':
@@ -770,15 +797,17 @@ async def handler(websocket: WebSocketServerProtocol, game: Game):
                     break
     except ConnectionClosedError as e:
         if unit_id is not None:
-            print("Unit disconnected with", e)
+            _logger.info(f"Finalizing unit: {unit_id:#x}")
             game.unregister(unit_id)
 
 
 async def process_request(path, req_headers, game_params: GamemasterFSM):
     if path == '/alive':
         if game_params._state == GamemasterFSM.STATES.Gamemaster:
+            _logger.info("Handling /alive request, returning FOUND (302)")
             return http.HTTPStatus.FOUND, [], f'{game_params.model.url}\n'.encode()
         else:
+            _logger.info("Handling /alive request, returning active gamemaster URL")
             return http.HTTPStatus.OK, [], f'{game_params.model.active_gamemaster}\n'.encode()
     elif path == '/gamemaster':
         if game_params._state == GamemasterFSM.STATES.Gamemaster:
