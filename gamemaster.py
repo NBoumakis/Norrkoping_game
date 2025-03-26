@@ -9,10 +9,9 @@ import random
 import ssl
 import sys
 from typing import Any, Optional, Union
-import requests
 
 import aiohttp
-
+import websockets
 from websockets.server import serve
 from websockets.client import connect
 from websockets.exceptions import ConnectionClosedError
@@ -690,96 +689,122 @@ class Gamemaster():
         self.priority = priority
 
         self.active_gamemaster = ''
+        self.priorities = {}
 
     async def _get_is_gamemaster(self, session: aiohttp.ClientSession, url: str):
         try:
-            async with session.get(f"https://{url}:8002/gamemaster",
-                                   ssl=self.ca_certificate,
-                                   timeout=1) as response:
-                if response.status == http.HTTPStatus.FOUND:
-                    self.active_gamemaster = await response.text()
-                    return True
-        except (aiohttp.TooManyRedirects, aiohttp.ClientConnectionError):
-            pass
-
-        return False
+            async with session.get(f"http://{url}:8002/gamemaster", timeout=1) as response:
+                response_text = await response.text()
+                if response.status in {200, 302}:
+                    priority = int(response_text.strip())
+                    logging.info(f"GM found at {url} with priority: {priority}")
+                    self.priorities[url] = priority
+                    return url if priority < self.priority else None
+                return False
+        except Exception as e:
+            logging.error(f"Error checking GM at {url}: {str(e)}")
+            return None
 
     async def get_gamemaster(self):
-        async with aiohttp.ClientSession(timeout=1) as session:
-            return any(await asyncio.gather(
-                *(self._get_is_gamemaster(session, url)
-                  for url in self.gamemaster_urls if url != self.url))
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as session:
+            results = await asyncio.gather(
+                *(self._get_is_gamemaster(session, url) for url in self.gamemaster_urls if url != self.url),
+                return_exceptions=False
             )
+            active_gms = [result for result in results if result not in (False, None)]
+            if active_gms:
+                self.active_gamemaster = min(active_gms, key=lambda url: self.priorities[url])  # Pick the highest priority
+                return self.active_gamemaster
+            if all(result is None for result in results):
+                return None
+            return False
 
     async def _request_gamemaster(self, session: aiohttp.ClientSession, url: str):
         try:
-            async with session.get(f"https://{url}:8002/request_gamemaster",
-                                   ssl=self.ca_certificate) as response:
-                if response.status == http.HTTPStatus.OK:
+            async with session.get(f"http://{url}:8002/request_gamemaster") as response:
+                response_text = await response.text()
+                logging.info(f"GM request to {url} got: {response.status}, Body: {response_text}")
+                if response.status == 200:
+                    # logging.info(f"Successfully became GM at {url}")
                     return True
-                elif response.status == http.HTTPStatus.CONFLICT:
-                    if int(await response.text()) > self.priority:
-                        self.active_gamemaster = url
-                        return False
-                    else:
-                        return True
-                elif response.status == http.HTTPStatus.FOUND:
-                    self.active_gamemaster = url
+                elif response.status == 302:
                     return False
-        except (aiohttp.TooManyRedirects, aiohttp.ClientConnectionError):
-            pass
-
-        return True
+        except Exception as e:
+            logging.error(f"Network error on GM request at {url}: {str(e)}")
+            return None
 
     async def request_gamemaster(self):
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(1)) as session:
-            return all(await asyncio.gather(
-                *(self._request_gamemaster(session, url)
-                    for url in self.gamemaster_urls if url != self.url)))
-
+        print(f"Requesting GM from URLs: {self.gamemaster_urls}")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1)) as session:
+            results = await asyncio.gather(
+                *(self._request_gamemaster(session, url) for url in self.gamemaster_urls if url != self.url),
+                return_exceptions=False
+            )
+            if all(result is True for result in results if result is not None):
+                self.active_gamemaster = self.url
+                logging.info(f"------- Successfully became the active Gamemaster: {self.url} -------")
+                return True
+            elif any(result is False for result in results if result is not None):
+                return False
+            return None
 
 class GamemasterFSM():
     STATES = IntEnum('States', ['Initial', 'Intent', 'Gamemaster', 'End'])
 
     def __init__(self, model: Gamemaster) -> None:
         self._state = GamemasterFSM.STATES.Initial
-        self.actions = {
-            GamemasterFSM.STATES.Initial: self._initial_action,
-            GamemasterFSM.STATES.Intent: self._intent_action,
-            GamemasterFSM.STATES.Gamemaster: self._gamemaster_action,
-            GamemasterFSM.STATES.End: self._end_action,
-        }
         self.model = model
+        self.waiting_intent = []
+        logging.info(f"Initialized FSM in {self._state.name} state.")
 
     async def step(self):
-        await self.actions[self._state]()
+        logging.info(f"FSM stepping from state {self._state.name}")
+        if self._state == self.STATES.Initial:
+            result = await self.model.get_gamemaster()
+            if result:
+                logging.info(f"FSM detected active GM at {result}. Transitioning to Intent state.")
+                self._state = self.STATES.Intent
+                self.waiting_intent.append((self.model.url, self.model.priority))
+            else:
+                logging.info("No active GM found. Attempting to become GM.")
+                if await self.model.request_gamemaster():
+                    self._state = self.STATES.Gamemaster
+                    # logging.info("Successfully became Gamemaster.")
+                else:
+                    logging.error("Failed to become GM. Staying in Initial to retry.")
+                    await asyncio.sleep(5)
+        elif self._state == self.STATES.Intent:
+            while True:
+                result = await self.model.get_gamemaster()
+                if result:
+                    logging.info(f"------- Still detected active Gamemaster at {result}. Remaining in Intent. -------")
+                    self.waiting_intent.append((self.model.url, self.model.priority))
+                    await asyncio.sleep(10)
+                else:
+                    logging.info("No active Gamemaster on recheck. Attempting to become Gamemaster.")
+                    if await self.model.request_gamemaster():
+                        self._state = self.STATES.Gamemaster
+                        logging.info("------- Successfully transitioned to Gamemaster from Intent state. -------")
+                        break
+                    await asyncio.sleep(5)
+        elif self._state == self.STATES.Gamemaster:
+            logging.info("Operating as Gamemaster.")
+            await asyncio.sleep(10)
+        elif self._state == self.STATES.End:
+            logging.info("Active Gamemaster has failed. Notifying highest priority in Intent state.")
+            if self.waiting_intent:
+                self.waiting_intent.sort(key=lambda gm: gm[1])  # Sort by priority
+                highest_priority_url = self.waiting_intent[0][0]
+                try:
+                    async with connect(f"ws://{highest_priority_url}:8002") as socket:
+                        await socket.send(json.dumps({'type': 'GM_FAIL'}))
+                except ConnectionClosedError:
+                    pass
+                self.waiting_intent.pop(0)
+                self._state = self.STATES.Initial
+                await self.step()  # Retry logic
 
-    async def _initial_action(self):
-        if await self.model.get_gamemaster():
-            print("Found GM Enter End")
-            self._state = GamemasterFSM.STATES.End
-        else:
-            print("Not Found GM Enter intent")
-            self._state = GamemasterFSM.STATES.Intent
-
-    async def _intent_action(self):
-        if await self.model.request_gamemaster():
-            print("Become GM")
-            self._state = GamemasterFSM.STATES.Gamemaster
-        else:
-            print("Found GM Enter End")
-            self._state = GamemasterFSM.STATES.End
-
-    async def _gamemaster_action(self):
-        print("Pass")
-        pass
-
-    async def _end_action(self):
-        print("Broken")
-        self._state = GamemasterFSM.STATES.Initial
-
-
-async def handler(websocket: WebSocketServerProtocol, game: Game):
+async def handler(websocket: WebSocketServerProtocol, path: str, game: Game):
     unit_id = None
     try:
         async for msg in websocket:
@@ -809,14 +834,35 @@ async def handler(websocket: WebSocketServerProtocol, game: Game):
             elif decoded['type'] == 'UNREGISTER':
                 if unit_id is not None:
                     game.unregister(unit_id)
+                    await websocket.close()
                     break
     except ConnectionClosedError as e:
+        # _logger.error(f"Connection closed with error: {e}")
+        if unit_id is not None:
+            game.unregister(unit_id)
+    except Exception as e:
+        _logger.error(f"Unexpected error: {e}")
+        if unit_id is not None:
+            game.unregister(unit_id)
+    finally:
         if unit_id is not None:
             _logger.info(f"Finalizing unit: {unit_id:#x}")
             game.unregister(unit_id)
 
+# Helper function to decide if a request is for WebSocket or HTTP
+async def is_websocket_request(request_headers):
+    upgrade_header = request_headers.get('Upgrade', '').lower()
+    connection_header = request_headers.get('Connection', '').lower()
+    return 'websocket' in upgrade_header and 'upgrade' in connection_header
 
 async def process_request(path, req_headers, game_params: GamemasterFSM):
+    upgrade_header = req_headers.get('Upgrade', '').lower()
+    connection_header = req_headers.get('Connection', '').lower()
+
+    if 'websocket' in upgrade_header and 'upgrade' in connection_header:
+        _logger.info("WebSocket upgrade request detected")
+        return None
+
     if path == '/alive':
         if game_params._state == GamemasterFSM.STATES.Gamemaster:
             _logger.info("Handling /alive request, returning FOUND (302)")
@@ -824,18 +870,21 @@ async def process_request(path, req_headers, game_params: GamemasterFSM):
         else:
             _logger.info("Handling /alive request, returning active gamemaster URL")
             return http.HTTPStatus.OK, [], f'{game_params.model.active_gamemaster}\n'.encode()
+
     elif path == '/gamemaster':
         if game_params._state == GamemasterFSM.STATES.Gamemaster:
-            return http.HTTPStatus.FOUND, [], f'{game_params.model.url}\n'.encode()
+            return http.HTTPStatus.FOUND, [], f'{game_params.model.priority}\n'.encode()
         else:
-            return http.HTTPStatus.OK, [], f'{game_params.model.active_gamemaster}\n'.encode()
+            return http.HTTPStatus.OK, [], f'{game_params.model.priority}\n'.encode()
     elif path == '/request_gamemaster':
         if game_params._state in {GamemasterFSM.STATES.Initial, GamemasterFSM.STATES.End}:
-            return http.HTTPStatus.OK, [], b''
+            return http.HTTPStatus.OK, [], f'{game_params.model.priority}\n'.encode()
         elif game_params._state == GamemasterFSM.STATES.Intent:
             return http.HTTPStatus.CONFLICT, [], f'{game_params.model.priority}\n'.encode()
         elif game_params._state == GamemasterFSM.STATES.Gamemaster:
             return http.HTTPStatus.FOUND, [], f'{game_params.model.url}\n'.encode()
+    else:
+        return http.HTTPStatus.NOT_FOUND, [], b'Unhandled request path'
 
 
 def parse_arguments(args: list[str]):
@@ -860,8 +909,21 @@ def parse_arguments(args: list[str]):
                         metavar='path',
                         help='The path to the CA certificate', required=True)
 
+    parser.add_argument('--port', type=int, default=8002, help='The port to use for the server')
+
     return parser.parse_args(args)
 
+# async def start_server(url, port, game, ssl_context, process_request):
+async def start_server(url, port, game, process_request):
+    print(f"Starting server at {url}:{port}")
+    async with serve(
+        lambda ws, path: handler(ws, path, game),
+        url,
+        port,
+        ping_interval=5,
+        # ssl=ssl_context,
+        process_request=process_request):
+        await asyncio.Future()  # run forever
 
 async def main(args: list[str]):
     options = parse_arguments(args)
@@ -881,18 +943,24 @@ async def main(args: list[str]):
     async def process_wrap(path, req_h):
         return await process_request(path, req_h, gamemaster_state)
 
-    # Refactor: Push everything to the same server port
-    async with serve(lambda x: handler(x, Game()), options.url, 8002, ping_interval=5, ssl=ssl_context, process_request=process_wrap):
+    port = options.port
+
+    async with serve(lambda ws, path: handler(ws, path, game), options.url, 8002, ping_interval=5, process_request=process_wrap):
         while True:
             if gamemaster_state._state == gamemaster_state.STATES.Gamemaster:
-                async with serve(lambda x: handler(x, game), options.url, 8001, ping_interval=5, ssl=ssl_context):
-                    await asyncio.Future()  # run forever
+                async with serve(lambda ws, path: handler(ws, path, game), options.url, 8001, ping_interval=5):
+                    await asyncio.Future()
             elif gamemaster_state._state == gamemaster_state.STATES.End:
+                gamemaster_state.waiting_intent.sort(key=lambda gm: gm[1])  # Sort by priority
+                highest_priority_url = gamemaster_state.waiting_intent[0][0]
                 try:
-                    async with connect(f"wss://{gamemaster_params.active_gamemaster}:8002", ssl=ssl_context) as socket:
-                        await asyncio.Future()
+                    async with connect(f"ws://{highest_priority_url}:8002") as socket:
+                        await socket.send(json.dumps({'type': 'GM_FAIL'}))
                 except ConnectionClosedError:
                     pass
+                gamemaster_state.waiting_intent.pop(0)
+                gamemaster_state._state = gamemaster_state.STATES.Initial
+                await gamemaster_state.step()
             await gamemaster_state.step()
 
 if __name__ == "__main__":
