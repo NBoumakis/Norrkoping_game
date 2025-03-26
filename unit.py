@@ -16,6 +16,7 @@ import ssl
 import sys
 import requests
 import websockets
+import logging
 
 from websockets.client import connect
 from websockets.client import WebSocketClientProtocol
@@ -37,6 +38,8 @@ LED_PIN = 21        # GPIO pin connected to the pixels (21 uses PCM).
 
 RECHECK_INTERVAL = 10
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class Controller(ABC):
     STATES = IntEnum('States', ['IDLE', 'RUNNING'])
@@ -262,11 +265,12 @@ def get_cpu_id():
 async def register(ws):
     message = json.dumps({'type': "REGISTER", "id": get_cpu_id()}).encode()
     await send_server(ws, message)
-
+    logger.info(f"Registered with ID: {get_cpu_id()}")
 
 async def unregister(ws):
     message = json.dumps({'type': "UNREGISTER"}).encode()
     await send_server(ws, message)
+    logger.info("Unregistered")
 
 
 async def recv_server(socket: WebSocketClientProtocol,
@@ -299,17 +303,17 @@ async def recv_server(socket: WebSocketClientProtocol,
 
 async def send_server(socket: WebSocketClientProtocol, message: bytes):
     await socket.send(message)
-
+    logger.info(f"Sent message: {message}")
 
 def button_pressed(ws: WebSocketClientProtocol, eventloop: asyncio.AbstractEventLoop):
     message = json.dumps({'type': "BUTTON_PRESSED"}).encode()
     asyncio.run_coroutine_threadsafe(send_server(ws, message), eventloop)
-
+    logger.info("Button pressed")
 
 def button_released(ws: WebSocketClientProtocol, eventloop: asyncio.AbstractEventLoop):
     message = json.dumps({'type': "BUTTON_RELEASED"}).encode()
     asyncio.run_coroutine_threadsafe(send_server(ws, message), eventloop)
-
+    logger.info("Button released")
 
 def parse_arguments(args: list[str]):
     parser = argparse.ArgumentParser()
@@ -413,6 +417,7 @@ async def main(args: list[str]):
             await led_matrix_queue.put((i, stop_matrix))
             await sound_queue.put((i, stop_sound))
 
+            logger.warning("No gamemaster found. Rechecking...")
             await asyncio.sleep(RECHECK_INTERVAL)
 
             stop_blink = {'type': 'BUTTON_LED', 'value': 'STOP'}
