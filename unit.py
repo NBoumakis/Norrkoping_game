@@ -105,6 +105,10 @@ class ButtonLEDController(Controller):
             self.led.blink(0.1, 0.1, on_color=(1, 0, 0))
         elif args[0] == 'flash_blue':
             self.led.blink(0.1, 0.1, on_color=(0, 0, 1))
+        elif args[0] == 'flash_yellow_player1_win':
+            self.led.blink(0.3, 0.3, on_color=(1, 1, 0))
+        elif args[0] == 'flash_blue_player2_win':
+            self.led.blink(0.3, 0.3, on_color=(0, 0, 1))
 
     async def off(self):
         await self.stop()
@@ -136,6 +140,30 @@ class MatrixLEDController(Controller):
                 await asyncio.sleep(0.04)
         elif args[0] == 'swipe_red':
             pattern: list[tuple[int, int, int]] = [(255, 0, 0), (0, 0, 0)]
+
+            loop = cycle(pattern)
+
+            while self.state == Controller.STATES.RUNNING:
+                color = next(loop)
+                for led_index in range(self.matrix.numPixels()):
+                    self.matrix.setPixelColorRGB(led_index, *color)
+                self.matrix.show()
+
+                await asyncio.sleep(0.1)
+        elif args[0] == 'swipe_blue':
+            pattern: list[tuple[int, int, int]] = [(0, 0, 255), (0, 0, 0)]
+
+            loop = cycle(pattern)
+
+            while self.state == Controller.STATES.RUNNING:
+                color = next(loop)
+                for led_index in range(self.matrix.numPixels()):
+                    self.matrix.setPixelColorRGB(led_index, *color)
+                self.matrix.show()
+
+                await asyncio.sleep(0.1)
+        elif args[0] == 'swipe_yellow':
+            pattern: list[tuple[int, int, int]] = [(255, 255, 0), (0, 0, 0)]
 
             loop = cycle(pattern)
 
