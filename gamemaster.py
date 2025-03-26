@@ -90,8 +90,8 @@ class Unit:
             f"sounds/on_green_press/green-press{random.randint(1, 7)}.wav", at)
 
     def correct(self, at: datetime):
-        self.start_button_led((0, 255, 0), at)
-        self.start_matrix((0, 255, 0), at)
+        self.start_button_led((255, 255, 0), at)
+        self.start_matrix((255, 205, 0), at)
 
     def wrong(self, at: datetime):
         self.start_button_led((255, 0, 0), at)
