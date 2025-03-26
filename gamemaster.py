@@ -88,6 +88,11 @@ class Unit:
         self.play_sound(
             f"sounds/on_green_press/green-press{random.randint(1, 7)}.wav", at)
 
+    def correct_pressed_multiplayer(self, color: tuple[int, int, int], at: datetime):
+        self.start_button_led(color, at)
+        self.start_matrix(color, at)
+        self.play_sound(f"sounds/on_green_press/green-press{random.randint(1, 7)}.wav", at)
+
     def correct(self, at: datetime):
         self.start_button_led((255, 255, 0), at)
         self.start_matrix((255, 205, 0), at)
@@ -118,11 +123,27 @@ class Game:
                    'Lose',
                    'Win',
                    'WaitRelease',
+                   'PreGameMultiplayer', #Multi: Added new states.
+                   'PlayingMultiplayer',
+                   'EndMultiplayer',
                    'Timeout'])  #(Bugfix) New Timeout State
 
     def __init__(self) -> None:
         self._state = Game.STATES.NoUnits
         self.ACTIVE: dict[int, Unit] = {}
+
+        self.sleeping = False  # Bugfix for sleep
+
+        self.fast_press_detected = False # Multi: Added to recognize fastpush and distinguish players
+        self.player_scores = {1: 0, 2: 0}
+        self.player_colors = {1: (255, 255, 0), 2: (0, 0, 255)}
+        self.unit_player_map = {}
+
+        self.correct_units = {1: None, 2: None}
+        self.wrong_units = {1: None, 2: None}
+
+        self.last_press_time = None  # Multi: Initialize to track the last press time
+        self.press_threshold = 2.0  # Multi: Time threshold in seconds for fast press detection
 
         self.previous_correct: set[int] = set()
         self.unit_list: list[int] = []
@@ -138,7 +159,9 @@ class Game:
             Game.STATES.PlayingAllReleased: self._button_pressed_PlayingAllReleased,
             Game.STATES.Lose: self._button_pressed_Lose,
             Game.STATES.Win: self._button_pressed_Win,
-            Game.STATES.WaitRelease: self._button_pressed_WaitRelease
+            Game.STATES.WaitRelease: self._button_pressed_WaitRelease,
+            Game.STATES.PreGameMultiplayer: self._button_pressed_PlayingMultiplayer,
+            Game.STATES.PlayingMultiplayer: self._button_pressed_PlayingMultiplayer
         }
 
         self._button_released_callbacks = {
@@ -188,6 +211,13 @@ class Game:
 
         if unit_id in self.ACTIVE:
             unit = self.ACTIVE[unit_id]
+
+            # Always check for fast press first
+            if unit_id == self.correct and self.state in {Game.STATES.Playing, Game.STATES.PlayingAllReleased} and self._is_fast_press():
+                _logger.info("Fast press detected, transitioning to multiplayer mode")
+                self.fast_press_detected = True
+                self._start_multiplayer()
+                return
 
             unit.button_pressed = True
             self.pressed_units.add(unit)
@@ -303,11 +333,10 @@ class Game:
                                  timedelta(seconds=unit.ws.latency)
                                  )
 
-            self.previous_correct = set()
             self.previous_correct.add(unit.unit_id)
-
+            self.last_button_press = datetime.now()
             self._setup_game()
-            self.unit_list.remove(self.correct)
+            self.unit_list.remove(unit.unit_id)
 
             self._next_correct()
             self._next_wrong()
@@ -317,6 +346,15 @@ class Game:
             self._control_task = asyncio.create_task(self._control_Playing())
 
             self.state = Game.STATES.Playing
+
+    def _update_unit_display(self, unit: Unit, player: int): #Multi:
+        unit.start_button_led(self.player_colors[player], datetime.now())
+
+    def _end_multiplayer_game(self, winner: int): #Multi:
+        self.state = Game.STATES.Win
+        for unit in self.ACTIVE.values():
+            unit.win(f"player{winner}_win_sound.mp3", datetime.now())
+        _logger.info(f"Player {winner} wins the game!")
 
     def _button_pressed_Playing(self, unit: Unit):
         if unit.unit_id in self.previous_correct:
@@ -567,6 +605,179 @@ class Game:
 
         _logger.info(f"Game: Next correct, Unit: {self.correct:#x}")
 
+    def _is_fast_press(self) -> bool:
+        current_time = datetime.now()
+        if self.last_press_time is None:
+            self.last_press_time = current_time
+            _logger.info("First press detected, initializing last_press_time")
+            return False
+
+        time_difference = (current_time - self.last_press_time).total_seconds()
+        _logger.info(f"Time difference between presses: {time_difference} seconds")
+        self.last_press_time = current_time  # Update the last press time
+
+        _logger.info(time_difference < self.press_threshold)
+        return time_difference < self.press_threshold
+
+    def _start_multiplayer(self):
+        _logger.info("Entering Multiplayer Mode")
+        self._reset_game()  # Reset game state
+        self.state = Game.STATES.PreGameMultiplayer
+
+        async def transition_to_multiplayer():
+            for unit in self.ACTIVE.values():
+                unit.stop_all(datetime.now())
+
+            await asyncio.sleep(1)  # Brief delay before starting multiplayer
+
+            # Setup multiplayer game
+            self._setup_multiplayer_game()
+            self._control_task = asyncio.create_task(self._control_PlayingMultiplayer())
+
+        if self._control_task is not None:
+            _logger.info(f"_start_multiplayer cancels task:{self._control_task}")
+            self._control_task.cancel()
+
+        # Start the transition to multiplayer mode
+        asyncio.create_task(transition_to_multiplayer())
+
+    async def _control_PreGameMultiplayer(self):
+        while True:
+            if self.correct is not None:
+                correct_unit = self.ACTIVE[self.correct]
+                correct_unit.stop_all(
+                    datetime.now() +
+                    timedelta(seconds=0.1) +
+                    timedelta(seconds=correct_unit.ws.latency)
+                )
+            while self.correct == (next_unit := random.choice(list(self.ACTIVE.keys()))):
+                pass
+
+            self.correct = next_unit
+            correct_unit = self.ACTIVE[self.correct]
+
+            correct_unit.correct(
+                datetime.now() +
+                timedelta(seconds=0.1) +
+                timedelta(seconds=correct_unit.ws.latency)
+            )
+
+            _logger.info(f"Game: Next correct, Unit: {self.correct:#x}")
+
+            await asyncio.sleep(10)
+
+    def _reset_game(self):
+        # Reset game state
+        for unit in self.ACTIVE.values():
+            unit.stop_all(datetime.now())
+        self.previous_correct.clear()
+        self.unit_list.clear()
+        self.player_unit_queue = {1: [], 2: []}
+        self.correct = None
+        self.wrong = None
+        self.pressed_units.clear()
+        if self._control_task is not None:
+            _logger.info(f"_reset_game cancels task:{self._control_task}")
+            self._control_task.cancel()
+            #self._control_task = None
+
+    def _setup_multiplayer_game(self):
+        for unit in self.ACTIVE.values():
+            unit.stop_all(datetime.now())
+
+        self.previous_correct = set()
+        self.player_scores = {1: 0, 2: 0}
+
+        # Randomly assign units to players
+        units = list(self.ACTIVE.keys())
+        random.shuffle(units)
+        midpoint = len(units) // 2
+        self.player_unit_queue = {1: units[:midpoint], 2: units[midpoint:]}
+
+
+        # Start blinking the first unit for each player
+        for player in [1, 2]:
+            self._next_correct_multi(player)
+
+    def _button_pressed_PlayingMultiplayer(self, unit: Unit):
+        # _logger.info("IDS:")
+        # _logger.info(unit.unit_id)
+        # _logger.info(self.correct_units)
+        if unit.unit_id == self.correct_units[1]:
+            player = 1
+        elif unit.unit_id == self.correct_units[2]:
+            player = 2
+        else:
+            return
+        # if unit.unit_id in self.previous_correct:
+            # Ignore if the unit is already pressed
+        # _logger.info(f"Player: {player}")
+        # _logger.info(self.player_unit_queue)
+        self.player_scores[player] += 1
+        color = self.player_colors[player]
+        unit.correct_pressed_multiplayer(color, datetime.now() + timedelta(seconds=0.1) + timedelta(seconds=unit.ws.latency))
+
+        # Mark the unit as pressed
+        self.previous_correct.add(unit.unit_id)
+
+        # Set up the next correct unit for the player immediately
+        self._next_correct_multi(player)
+        _logger.info("STOPPED COUNTING FOR TIMEOUT")
+        if self._control_task is not None:
+            _logger.info(f"_button_pressed_PlayingMultiplayer cancels task:{self._control_task}")
+            self._control_task.cancel()
+
+        # Check if the player has won
+        if self.player_scores[player] >= len(self.ACTIVE) // 2 and self.state != Game.STATES.EndMultiplayer:
+            self.state = Game.STATES.EndMultiplayer
+            self._control_task = asyncio.create_task(self._control_EndMultiplayer(player))
+        else:
+            self._control_task = asyncio.create_task(self._control_PlayingMultiplayer())
+
+    def _next_correct_multi(self, player: int):
+        available_units = self.player_unit_queue[player]
+        if available_units:
+            correct_unit_id = available_units.pop(0)
+            self.correct_units[player] = correct_unit_id
+
+            # Set blinking effect based on player color
+            if self.player_colors[player] == (255, 255, 0):  # Yellow player
+                button_color_effect = "flash_yellow_player1_win"
+                matrix_color_effect = "swipe_yellow"
+            else:  # Blue player
+                button_color_effect = "flash_blue_player2_win"
+                matrix_color_effect = "swipe_blue"
+            self.ACTIVE[correct_unit_id].start_button_led(button_color_effect, datetime.now())
+            self.ACTIVE[correct_unit_id].start_matrix(matrix_color_effect, datetime.now())
+            _logger.info(f"Game: Next correct for player {player}, Unit: {correct_unit_id:#x}")
+
+    async def _player_win(self, player: int): #Multi:
+        win_color = self.player_colors[player]
+        win_sound = random.randint(1, 8)
+
+        if win_color == (255, 255, 0):
+            button_effect = "flash_yellow_player1_win"
+            matrix_effect = "swipe_yellow"
+        else:
+            button_effect = "flash_blue_player2_win"
+            matrix_effect = "swipe_blue"
+
+        for unit in self.ACTIVE.values():
+            unit.start_button_led(button_effect, datetime.now())
+            unit.start_matrix(matrix_effect, datetime.now())
+            unit.play_sound(f"sounds/win/win{win_sound}.wav", datetime.now())
+        await asyncio.sleep(10)
+        for unit in self.ACTIVE.values():
+            unit.stop_all(datetime.now())
+
+        # Transition to the "Ready to Play" state (PreGameMultiple)
+        self._reset_game()
+        self.state = Game.STATES.PreGameMultiple
+        # self._setup_game()
+        self._control_task = asyncio.create_task(self._control_PreGameMultiple())
+
+        _logger.info("Transitioned to Ready to Play state after multiplayer win.")
+
     async def _control_PreGameMultiple(self):
         while True:
             if self.correct is not None:
@@ -592,6 +803,19 @@ class Game:
             _logger.info(f"Game: Next correct, Unit: {self.correct:#x}")
 
             await asyncio.sleep(10)
+
+    async def _control_PlayingMultiplayer(self):
+        _logger.info("STARTED COUNTING FOR TIMEOUT")
+
+        await asyncio.sleep(15)
+        if self._control_task is not None:
+            _logger.info(f"_control_PlayingMultiplayer cancels task:{self._control_task}")
+            self._control_task.cancel()
+        self._control_task = asyncio.create_task(self._control_Timeout())
+        self.state = Game.STATES.Timeout #(Bugfix) Removed logic from here and moved to the Timeout state.
+
+    async def _control_EndMultiplayer(self, player): #Multi:
+        await self._player_win(player)
 
     async def _control_WaitRelease(self):
         await asyncio.sleep(10)
