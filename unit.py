@@ -360,14 +360,17 @@ def discover_gamemaster(gamemaster_urls: list[str], ca_certificate: str):
     for url in gamemaster_urls:
         try:
             response = requests.get(
-                f"https://{url}:8002/alive",
-                verify=ca_certificate,
-                timeout=1)
-
-            gamemaster = response.content.decode().strip()
-        except (requests.ReadTimeout, requests.TooManyRedirects, requests.ConnectionError):
-            pass
-
+                f"http://{url}:8002/alive",  # Changed to http
+                verify=False,
+                timeout=1
+            )
+            if response.status_code == 302:
+                gamemaster = response.content.decode().strip()
+                logger.info(f"Found active gamemaster at {url}")
+                break
+        except (requests.ReadTimeout, requests.TooManyRedirects, requests.ConnectionError) as e:
+            logger.error(f"Error discovering gamemaster at {url}: {e}")
+    logger.info(f"Discovered gamemaster: {gamemaster}")
     return gamemaster
 
 
