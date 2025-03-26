@@ -118,7 +118,8 @@ class Game:
                    'PlayingAllReleased',
                    'Lose',
                    'Win',
-                   'WaitRelease'])
+                   'WaitRelease',
+                   'Timeout'])  #(Bugfix) New Timeout State
 
     def __init__(self) -> None:
         self._state = Game.STATES.NoUnits
@@ -182,16 +183,25 @@ class Game:
     def button_pressed(self, unit_id: int):
         _logger.info(f"Event: Button Pressed, Unit: {unit_id:#x}")
 
+        if self.state == Game.STATES.Timeout:  # Ignore button press during Timeout state
+            _logger.info("Ignoring button press during Timeout state")
+            return
+
         if unit_id in self.ACTIVE:
             unit = self.ACTIVE[unit_id]
 
             unit.button_pressed = True
             self.pressed_units.add(unit)
 
-            self._button_pressed_callbacks[self.state](unit)
+            if self.state in self._button_pressed_callbacks:
+                self._button_pressed_callbacks[self.state](unit)
 
     def button_released(self, unit_id: int):
         _logger.info(f"Event: Button Released, Unit: {unit_id:#x}")
+
+        if self.state == Game.STATES.Timeout: #(Bugfix) Set state to Timeout
+            _logger.info("Ignoring button release during Timeout state")
+            return
 
         if unit_id in self.ACTIVE:
             unit = self.ACTIVE[unit_id]
@@ -199,7 +209,8 @@ class Game:
             unit.button_pressed = False
             self.pressed_units.discard(unit)
 
-            self._button_released_callbacks[self.state](unit)
+            if self.state in self._button_released_callbacks: #Multi: include condition checks for single and multi
+                self._button_released_callbacks[self.state](unit)
 
     def register(self, unit_id: int, unit: Unit):
         _logger.info(f"Event: Unit Register, Unit: {unit}")
@@ -511,6 +522,30 @@ class Game:
             self.wrong = None
             _logger.info(f"Game: Next wrong, Unit: None")
 
+    async def _control_Timeout(self):
+        lose_sound = random.randint(1, 6)
+        for unit in self.ACTIVE.values():
+            unit.lose(f"sounds/lose/lose{lose_sound}.wav", datetime.now())
+
+        await asyncio.sleep(4)
+
+        for unit in self.ACTIVE.values():
+            unit.stop_all(datetime.now())
+
+        if not self.pressed_units:
+            if len(self.ACTIVE) > 1:
+                assert self._control_task is not None
+                _logger.info(f"_control_Timeout cancels task:{self._control_task}")
+                self._control_task.cancel()
+                self._control_task = asyncio.create_task(self._control_PreGameMultiple())
+                self.state = Game.STATES.PreGameMultiple
+            elif len(self.ACTIVE) == 1:
+                assert self._control_task is not None
+                _logger.info(f"_control_Timeout cancels task:{self._control_task}")
+                self._control_task.cancel()
+                self._control_task = asyncio.create_task(self._control_PreGameSingle())
+                self.state = Game.STATES.PreGameSingle
+
     async def _control_PreGameSingle(self):
         if self.correct is not None:
             correct_unit = self.ACTIVE[self.correct]
@@ -576,31 +611,11 @@ class Game:
 
     async def _control_PlayingAllReleased(self):
         await asyncio.sleep(15)
-
-        lose_sound = random.randint(1, 6)
-        for unit in self.ACTIVE.values():
-            unit.lose(f"sounds/lose/lose{lose_sound}.wav", datetime.now())
-
-        await asyncio.sleep(4)
-
-        for unit in self.ACTIVE.values():
-            unit.stop_all(datetime.now())
-
-        if not self.pressed_units:
-            if len(self.ACTIVE) > 1:
-                assert (self._control_task is not None)
-                self._control_task.cancel()
-                self._control_task = asyncio.create_task(
-                    self._control_PreGameMultiple())
-
-                self.state = Game.STATES.PreGameMultiple
-            elif len(self.ACTIVE) == 1:
-                assert (self._control_task is not None)
-                self._control_task.cancel()
-                self._control_task = asyncio.create_task(
-                    self._control_PreGameSingle())
-
-                self.state = Game.STATES.PreGameSingle
+        if self._control_task is not None:
+            _logger.info(f"_control_PlayingAllReleased cancels task:{self._control_task}")
+            self._control_task.cancel()
+        self._control_task = asyncio.create_task(self._control_Timeout())
+        self.state = Game.STATES.Timeout #(Bugfix) Removed logic from here and moved to the Timeout state.
 
     async def _control_Lose(self):
         lose_sound = random.randint(1, 6)
